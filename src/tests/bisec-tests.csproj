@@ -14,7 +14,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\bisec\bisec.csproj" />
+    <ProjectReference Include="..\bisec\BiSec.csproj" />
   </ItemGroup>
 
 </Project>

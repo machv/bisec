@@ -6,6 +6,10 @@
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
     <Description>Unofficial SDK for BiSecur Gateways.</Description>
     <PackageProjectUrl>https://github.com/machv/bisec</PackageProjectUrl>
+    <Authors>Vladimír Mach</Authors>
+    <Product>BiSec</Product>
+    <Version>0.0.2</Version>
+	<PackageVersion>0.0.2-beta</PackageVersion>
   </PropertyGroup>
 
   <ItemGroup>

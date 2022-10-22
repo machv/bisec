@@ -11,6 +11,7 @@
 		<Product>BiSec</Product>
 		<Version>0.0.4</Version>
 		<PackageVersion>0.0.4-beta</PackageVersion>
+
 	</PropertyGroup>
 
 	<PropertyGroup>

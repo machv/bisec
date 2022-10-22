@@ -45,6 +45,11 @@ namespace BiSec.Library
             _logger = logger;
         }
 
+        public void Disconnect()
+        {
+            _gatewayConnection.Disconnect();
+        }
+
         public async Task<bool> PingAsync()
         {
             Message message = new Message

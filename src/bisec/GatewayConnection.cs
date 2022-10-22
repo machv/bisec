@@ -75,6 +75,11 @@ namespace BiSec.Library
             ThreadPool.QueueUserWorkItem(new WaitCallback(ProcessIncoming));
         }
 
+        public void Disconnect()
+        {
+            TerminateSession();
+        }
+
         private void ProcessOutgoing(object state)
         {
             _consumeSendingQueueCancellation = new CancellationTokenSource();

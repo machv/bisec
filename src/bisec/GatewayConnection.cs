@@ -369,7 +369,7 @@ namespace BiSec.Library
 
             if (queueItem is PackageQueueItem<T> item)
             {
-                if (cancellationToken != null)
+                if (cancellationToken.CanBeCanceled)
                 {
                     cancellationToken.Register(() =>
                     {

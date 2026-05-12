@@ -45,9 +45,9 @@ namespace BiSec.Library
             return Jmcp("{\"cmd\":\"GET_GROUPS\"}");
         }
 
-        public static Payload GetGroupsForUser()
+        public static Payload GetGroupsForUser(int forUser = 1)
         {
-            return Jmcp("{\"cmd\":\"GET_GROUPS\", \"FORUSER\":1}");
+            return Jmcp($"{{\"cmd\":\"GET_GROUPS\", \"forUser\":{forUser}}}");
         }
 
         public static Payload GetUsers()

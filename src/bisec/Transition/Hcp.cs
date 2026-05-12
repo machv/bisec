@@ -25,6 +25,9 @@ namespace BiSec
         public bool PositionOpen => _positionOpen;
 
         public bool HalfOpen => _halfOpened;
+        public bool ForecastLeadTime => _forecastLeadTime;
+        public bool Error => _error;
+        public bool NotReferenced => _notReferenced;
 
         public Hcp(byte[] bytes)
         {

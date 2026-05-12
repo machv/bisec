@@ -1,18 +1,13 @@
-﻿using System;
-using System.Collections;
+﻿using BiSec.Library.Exceptions;
+using System;
 
 namespace BiSec.Library
 {
     public class Transition
     {
-        /// <summary>
-        /// 100 is OPEN, 0 = CLOSED
-        /// 200 = UNLOCKED, 0 = LOCKED????
-        /// </summary>
+        private const int ExstLength = 8;
+
         int _actualState;
-        /// <summary>
-        /// 100 is OPEN, 0 = CLOSED
-        /// </summary>
         int _requestedState;
         bool _error;
         bool _autoClose;
@@ -23,15 +18,22 @@ namespace BiSec.Library
         DateTime _time;
         bool _ignoreRetries;
 
+        public int ActualState => _actualState;
+        public int RequestedState => _requestedState;
         public int ActualStateInPercent => _actualState / 2;
-
+        public int DriveTime => _driveTime;
+        public int Gk => _gk;
+        public byte[] Exst => _exst;
+        public bool Error => _error;
+        public bool AutoClose => _autoClose;
+        public bool IgnoreRetries => _ignoreRetries;
         public Hcp Hcp => _hcp;
 
         public bool IsDriving
         {
             get
             {
-                return _driveTime != 0 || _hcp.Driving;
+                return _driveTime != 0 || (_hcp?.Driving ?? false);
             }
         }
 
@@ -39,7 +41,7 @@ namespace BiSec.Library
         {
             get
             {
-                if (_driveTime == 0 && _hcp.Driving)
+                if (_driveTime == 0 && (_hcp?.Driving ?? false))
                 {
                     if (_hcp.DrivingToClose)
                     {
@@ -70,51 +72,84 @@ namespace BiSec.Library
 
         public Transition(byte[] bytes)
         {
-            //var byte3 = new BitArray(new byte[] { bytes[2] });
-            //_error = byte3[7];
-            //_autoClose = byte3[6];
+            if (bytes == null)
+                throw new ArgumentNullException(nameof(bytes));
 
-            _actualState = bytes[0];
-            _requestedState = bytes[1];
+            if (bytes.Length < 14)
+                throw new InvalidPackageLengthException("Transition payload is too short.");
 
-            if (bytes[2] >> 6 > 0)
+            int offset = 0;
+            _actualState = bytes[offset++];
+            _requestedState = bytes[offset++];
+
+            int driveHighAndFlags = bytes[offset++];
+            int driveLow = bytes[offset++];
+
+            if (driveHighAndFlags >> 6 > 0)
             {
-                if ((bytes[2] & 128) > 0) // bit 7
+                if ((driveHighAndFlags & 128) > 0)
                     _error = true;
 
-                if ((bytes[2] & 64) > 0) // bit 6
+                if ((driveHighAndFlags & 64) > 0)
                     _autoClose = true;
             }
 
             if (!_error)
-                _driveTime = ((bytes[2] & ~240) << 8) + bytes[3]; // clearing bit 6 and 7 of byte[2] + byte[3] to get total driveTime
+                _driveTime = ((driveHighAndFlags & ~240) << 8) + driveLow;
 
-            _gk = (bytes[4] << 8) + bytes[5]; // probably used with receivers to control 3rd party doors
+            int gkHigh = bytes[offset++];
+            int gkLow = bytes[offset++];
+            _gk = (gkHigh << 8) + gkLow;
 
-            if(bytes[4] < 252)
-                _hcp = new Hcp(bytes[6..8]);
+            if (gkHigh < 252)
+            {
+                EnsurePayloadLength(bytes, offset + 2);
+                _hcp = new Hcp(bytes[offset..(offset + 2)]);
+                offset += 2;
+            }
 
-            byte[] slice = bytes[8..16];
+            EnsurePayloadLength(bytes, offset + ExstLength);
+            byte[] slice = bytes[offset..(offset + ExstLength)];
             Array.Reverse(slice);
             _exst = slice;
             _time = DateTime.Now;
-            /*
-             val byte3 = BitSet.valueOf(ba[2].toByteArray())
-            return Transition(
-                stateInPercent = ba[0].toUByte().toInt() / 2,
-                desiredStateInPercent = ba[1].toUByte().toInt() / 2,
-                error = byte3[7],
-                autoClose = byte3[6],
-                driveTime = ba[3].toInt(),  // TODO: clear 6th and 7th bit from byte3 and shift add it here
-                gk = ByteBuffer.wrap(ba.copyOfRange(4, 6)).short.toInt(),
-                hcp = HCP.from(ba.copyOfRange(6, 8)),
-                exst = ba.copyOfRange(8, 16).toList().reversed(),
-                time = LocalDateTime.now(),
-                ignoreRetries = true
-            )
-             */
 
-
+            ApplyLegacyPostProcessing();
         }
+
+        private static void EnsurePayloadLength(byte[] bytes, int requiredLength)
+        {
+            if (bytes.Length < requiredLength)
+                throw new InvalidPackageLengthException("Transition payload is too short.");
+        }
+
+        private void ApplyLegacyPostProcessing()
+        {
+            if (_hcp != null)
+            {
+                if (!_hcp.Driving && (_driveTime > 0 || _hcp.ForecastLeadTime))
+                {
+                    _driveTime = 2;
+                    _ignoreRetries = true;
+                    _hcp = null;
+                }
+                else if (_hcp.Driving && _driveTime <= 0)
+                {
+                    _driveTime = 2;
+                    _ignoreRetries = true;
+                }
+            }
+
+            // APK ActorClasses.ESE = 0x0902 (2306). When the actor is an ESE drive
+            // and the transition is otherwise considered driving, the legacy app
+            // overrides driveTime to 5 and forces ignoreRetries=true.
+            if (_gk == ActorClassEse && IsDriving)
+            {
+                _driveTime = 5;
+                _ignoreRetries = true;
+            }
+        }
+
+        private const int ActorClassEse = 0x0902;
     }
 }

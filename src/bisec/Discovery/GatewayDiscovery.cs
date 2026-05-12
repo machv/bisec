@@ -74,23 +74,71 @@ namespace BiSec.Library
             //Console.WriteLine($"Received: {receiveString}");
             try
             {
-                var xml = XElement.Parse(receiveString);
-
-                state.Discovery._discoveryData = new DiscoveryResult()
-                {
-                    HwVersion = xml.Attribute("hwVersion").Value,
-                    SwVersion = xml.Attribute("swVersion").Value,
-                    Mac = xml.Attribute("mac").Value,
-                    Protocol = xml.Attribute("protocol").Value,
-                    SourceAddress = e.Address,
-                };
+                state.Discovery._discoveryData = ParseDiscoveryResponse(receiveString, e.Address);
 
                 state.Discovery.MessageReceived = true;
 
                 // Signal the main thread to continue.  
                 discoveryCompleted.Set();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Received invalid discovery response: {ex.Message}");
+            }
+        }
+
+        internal static DiscoveryResult ParseDiscoveryResponse(string response, IPAddress sourceAddress)
+        {
+            var xml = XElement.Parse(response);
+
+            string mac = GetValue(xml, "mac");
+            string protocol = GetValue(xml, "protocol") ?? GetValue(xml, "protocolVersion");
+            string hwVersion = GetValue(xml, "hwVersion");
+            string swVersion = GetValue(xml, "swVersion");
+
+            if (string.IsNullOrWhiteSpace(mac))
+                mac = FindMacLikeValue(xml);
+
+            if (string.IsNullOrWhiteSpace(mac))
+                throw new FormatException("Discovery response does not contain a gateway MAC address.");
+
+            return new DiscoveryResult()
+            {
+                HwVersion = hwVersion,
+                SwVersion = swVersion,
+                Mac = mac,
+                Protocol = protocol,
+                SourceAddress = sourceAddress,
+            };
+        }
+
+        private static string GetValue(XElement xml, string name)
+        {
+            foreach (var element in xml.DescendantsAndSelf())
+            {
+                foreach (var attribute in element.Attributes())
+                {
+                    if (string.Equals(attribute.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))
+                        return attribute.Value;
+                }
+
+                if (string.Equals(element.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))
+                    return element.Value;
+            }
+
+            return null;
+        }
+
+        private static string FindMacLikeValue(XElement xml)
+        {
+            foreach (var element in xml.DescendantsAndSelf())
+            {
+                string value = element.Value?.Trim();
+                if (!string.IsNullOrWhiteSpace(value) && value.Split(':').Length == 6)
+                    return value;
+            }
+
+            return null;
         }
 
         public void StartListener()
@@ -110,7 +158,7 @@ namespace BiSec.Library
 
         protected void SendDiscoveryRequest()
         {
-            string message = "<Discover target=\"LogicBox\"/>";
+            string message = "<Discover target=\"LogicBox\" />";
             byte[] data = Encoding.ASCII.GetBytes(message);
 
             Socket s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);

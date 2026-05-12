@@ -17,7 +17,6 @@ namespace BiSec.Library
 
         private ILogger _logger;
         private GatewayConnection _gatewayConnection;
-        private byte _tag;
         private string _userName;
         private string _password;
         private Dictionary<int, GroupType> _groupTypes;
@@ -56,11 +55,9 @@ namespace BiSec.Library
             {
                 Command = Command.Ping,
                 Payload = PayloadFactory.Empty,
-                Tag = GetNewTag(),
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             return response.Message.Command == Command.Ping;
         }
@@ -71,11 +68,9 @@ namespace BiSec.Library
             {
                 Command = Command.GetGatewayVersion,
                 Payload = PayloadFactory.Empty,
-                Tag = GetNewTag(),
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             return response.Message.Payload.TextContent;
         }
@@ -86,11 +81,9 @@ namespace BiSec.Library
             {
                 Command = Command.GetName,
                 Payload = PayloadFactory.Empty,
-                Tag = GetNewTag()
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             return response.Message.Payload.TextContent;
         }
@@ -101,11 +94,9 @@ namespace BiSec.Library
             {
                 Command = Command.Login,
                 Payload = PayloadFactory.Login(userName, password),
-                Tag = GetNewTag()
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             if (response.Message.Command == Command.Login)
             {
@@ -134,11 +125,9 @@ namespace BiSec.Library
             {
                 Command = Command.SCAN_WIFI,
                 Payload = PayloadFactory.Empty,
-                Tag = GetNewTag(),
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             return response.Message.Command == Command.Ping;
         }
@@ -149,11 +138,9 @@ namespace BiSec.Library
             {
                 Command = Command.GET_WIFI_STATE,
                 Payload = PayloadFactory.Empty,
-                Tag = GetNewTag(),
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             return response.Message.Command == Command.Ping;
         }
@@ -172,11 +159,9 @@ namespace BiSec.Library
             {
                 Command = Command.Jmcp,
                 Payload = PayloadFactory.GetUsers(),
-                Tag = GetNewTag()
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             var json = response.Message.Payload.TextContent;
             User[] users = ParseJsonResponse<User[]>(json);
@@ -190,11 +175,9 @@ namespace BiSec.Library
             {
                 Command = Command.ADD_USER,
                 Payload = PayloadFactory.AddUser(login, password),
-                Tag = GetNewTag()
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             var data = response.Message.Payload.ToByteArray();
 
@@ -207,11 +190,9 @@ namespace BiSec.Library
             {
                 Command = Command.SET_USER_RIGHTS,
                 Payload = PayloadFactory.SetUserRights(userId, groupIds),
-                Tag = GetNewTag()
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             // return value is user ID + ids of groups assigned
 
@@ -259,11 +240,9 @@ namespace BiSec.Library
             {
                 Command = Command.Jmcp,
                 Payload = PayloadFactory.GetValues(),
-                Tag = GetNewTag()
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             var json = response.Message.Payload.TextContent;
             var values = ParseJsonResponse<Dictionary<int, GroupType>>(json);
@@ -282,14 +261,12 @@ namespace BiSec.Library
             Package response = null;
             for (int i = 0; i < maxRetries; i++)
             {
-                _gatewayConnection.Send(message);
-                response = await _gatewayConnection.GetResponseAsync(message.Tag);
+                response = await _gatewayConnection.SendAsync(message);
 
                 if (response.Message.Command != Command.Error)
                     return response;
 
                 _logger?.LogWarning($"{message.Command} (Tag: {message.Tag}) error: {response.Message.GetError()}");
-                message.Tag = GetNewTag();
 
                 await Task.Delay(100);
             }
@@ -303,7 +280,6 @@ namespace BiSec.Library
             {
                 Command = Command.GetTransition,
                 Payload = PayloadFactory.GetTransition(port.Id),
-                Tag = GetNewTag()
             };
 
             var response = await GetResponseRetryAsync(message, MaxErrorRetryCount);
@@ -328,11 +304,9 @@ namespace BiSec.Library
             {
                 Command = Command.SetState,
                 Payload = PayloadFactory.SetState(port.Id),
-                Tag = GetNewTag()
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
             if(response.Message.Command.Code == Command.Error.Code) {
                 _logger?.LogWarning("set state got error response");
             }
@@ -356,11 +330,9 @@ namespace BiSec.Library
             {
                 Command = Command.Jmcp,
                 Payload = payload,
-                Tag = GetNewTag()
             };
 
-            _gatewayConnection.Send(message);
-            var response = await _gatewayConnection.GetResponseAsync(message.Tag);
+            var response = await _gatewayConnection.SendAsync(message);
 
             var json = response.Message.Payload.TextContent;
             Group[] groups = ParseJsonResponse<Group[]>(json);
@@ -374,14 +346,5 @@ namespace BiSec.Library
             return groups;
         }
 
-        private byte GetNewTag()
-        {
-            if (_tag >= 128)
-                _tag = 0;
-            else
-                _tag++;
-
-            return _tag;
-        }
     }
 }

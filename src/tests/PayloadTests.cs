@@ -15,5 +15,13 @@ namespace tests
             Assert.Equal("7B22434D44223A224745545F5553455253227D", StringHelper.HexStringFromByteArray(payload.ToByteArray()));
             Assert.Equal(command, payload.ToString());
         }
+
+        [Fact]
+        public void GetGroupsForUserPayload()
+        {
+            var payload = PayloadFactory.GetGroupsForUser();
+
+            Assert.Equal("{\"cmd\":\"GET_GROUPS\", \"forUser\":1}", payload.TextContent);
+        }
     }
 }

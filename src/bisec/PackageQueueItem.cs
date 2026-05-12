@@ -1,4 +1,5 @@
-﻿using System.Threading.Tasks;
+﻿using System;
+using System.Threading.Tasks;
 
 namespace BiSec.Library
 {
@@ -6,8 +7,10 @@ namespace BiSec.Library
     {
         private Package _package;
         public Package Package => _package;
+        public virtual Task Completion => Task.CompletedTask;
 
         public virtual void SetResult(Package result) { }
+        public virtual void SetException(Exception exception) { }
 
         public PackageQueueItem(Package package)
         {
@@ -19,6 +22,7 @@ namespace BiSec.Library
     {
         private TaskCompletionSource<T> _tcs;
         public TaskCompletionSource<T> TaskCompletionSource => _tcs;
+        public override Task Completion => _tcs.Task;
 
         public override void SetResult(Package result)
         {
@@ -27,7 +31,13 @@ namespace BiSec.Library
         public void SetResult(T result)
         {
             if (_tcs != null)
-                _tcs.SetResult(result); // Try?
+                _tcs.TrySetResult(result);
+        }
+
+        public override void SetException(Exception exception)
+        {
+            if (_tcs != null)
+                _tcs.TrySetException(exception);
         }
 
         public PackageQueueItem(Package package, TaskCompletionSource<T> tcs) : base(package)

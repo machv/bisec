@@ -12,7 +12,7 @@ namespace BiSec.Library
 
         public string GatewayId
         {
-            get => Mac.Replace(":", "").ToUpper();
+            get => Mac?.Replace(":", "").ToUpper();
         }
 
         public override string ToString()

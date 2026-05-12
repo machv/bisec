@@ -5,7 +5,7 @@ VisualStudioVersion = 17.2.32630.192
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "bisec-tests", "tests\bisec-tests.csproj", "{9AB1F985-2E83-482D-9947-22103EEE28BF}"
 EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "BiSec", "bisec\BiSec.csproj", "{52C9F4E3-F0B1-4868-A70B-ECFA9618C741}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "BiSec", "bisec\bisec.csproj", "{52C9F4E3-F0B1-4868-A70B-ECFA9618C741}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

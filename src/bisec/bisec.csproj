@@ -9,8 +9,8 @@
 		<RepositoryUrl>https://github.com/machv/bisec</RepositoryUrl>
 		<Authors>Vladimír Mach</Authors>
 		<Product>BiSec</Product>
-		<Version>0.0.4</Version>
-		<PackageVersion>0.0.4-beta</PackageVersion>
+		<Version>0.1.0</Version>
+		<PackageVersion>0.1.0-beta</PackageVersion>
 
 	</PropertyGroup>
 

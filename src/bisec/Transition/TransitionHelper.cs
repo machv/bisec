@@ -1,153 +1,131 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.Text;
 
 namespace BiSec.Library
 {
-   public class TransitionHelper
+    // Port of APK refactor.bisecur._5_UTIL.HmTransitionHelper.
+    public static class TransitionHelper
     {
-        /*
-     
-      public static function getActorState(param1:HmTransition) : String
-      {
-         var _loc2_:Number = param1 == null?Number(0):Number(param1.actual);
-         var _loc3_:Number = _loc2_ / 2;
-         return getActorStateFromPercent(_loc3_);
-      }
-      
-      public static function getActorStateFromPercent(param1:Number) : String
-      {
-         if(param1 == 0)
-         {
-            return ActorState.CLOSED;
-         }
-         if(param1 > 0 && param1 < 33.5)
-         {
-            return ActorState.HALF_3;
-         }
-         if(param1 >= 33.5 && param1 < 66.5)
-         {
-            return ActorState.HALF_2;
-         }
-         if(param1 >= 66.5 && param1 < 100)
-         {
-            return ActorState.HALF_1;
-         }
-         if(param1 == 100)
-         {
-            return ActorState.OPEN;
-         }
-         return ActorState.CLOSED;
-      }
-      
-      public static function hasError(param1:HmTransition) : Boolean
-      {
-         if(param1.error)
-         {
-            return true;
-         }
-         if(param1.hcp != null)
-         {
-            return param1.hcp.error;
-         }
-         return false;
-      }
-      
-      public static function hasHint(param1:HmTransition) : Boolean
-      {
-         if(param1.hcp != null)
-         {
-            if(param1.hcp.notReferenced)
-            {
-               return true;
-            }
-         }
-         return false;
-      }
-      
-      public static function isOpened(param1:HmTransition) : Boolean
-      {
-         if(param1.hcp != null)
-         {
-            return param1.hcp.positionOpen;
-         }
-         return param1.actual == 200;
-      }
-      
-      public static function isClosed(param1:HmTransition) : Boolean
-      {
-         if(param1.hcp != null)
-         {
-            return param1.hcp.positionClose;
-         }
-         return param1.actual == 0;
-      }
-      
-      public static function isDefinedHalfOpened(param1:HmTransition) : Boolean
-      {
-         if(param1.gk == ActorClasses.ESE)
-         {
-            return param1.actual == 100;
-         }
-         if(param1.hcp != null)
-         {
-            return param1.hcp.halfOpened;
-         }
-         return false;
-      }
-      
-      public static function isHalfOpened(param1:HmTransition) : Boolean
-      {
-         if(param1.hcp != null)
-         {
-            return param1.hcp.halfOpened;
-         }
-         return param1.actual > 0 && param1.actual < 200;
-      }
-      
-      public static function isDriving(param1:HmTransition) : Boolean
-      {
-         if(param1.hcp != null)
-         {
-            return param1.hcp.driving || param1.driveTime != 0;
-         }
-         return param1.driveTime != 0;
-      }
-      
-      public static function isDrivingToClose(param1:HmTransition) : Boolean
-      {
-         if(!isDriving(param1))
-         {
-            return false;
-         }
-         if(param1.hcp != null)
-         {
-            return param1.hcp.drivingToClose;
-         }
-         if(param1.actual > param1.desired && param1.driveTime > 0)
-         {
-            return true;
-         }
-         return false;
-      }
-      
-      public static function isDrivingToOpen(param1:HmTransition) : Boolean
-      {
-         if(!isDriving(param1))
-         {
-            return false;
-         }
-         if(param1.hcp != null)
-         {
-            return !param1.hcp.drivingToClose;
-         }
-         if(param1.actual < param1.desired && param1.driveTime > 0)
-         {
-            return true;
-         }
-         return false;
-      }
-   }
-         */
+        public static ActorState GetActorState(Transition transition)
+        {
+            double actual = transition == null ? 0 : transition.ActualState;
+
+            return GetActorStateFromPercent(actual / 2);
+        }
+
+        public static ActorState GetActorStateFromPercent(double percent)
+        {
+            if (percent == 0)
+                return ActorState.Closed;
+
+            if (percent > 0 && percent < 33.5)
+                return ActorState.Half3;
+
+            if (percent >= 33.5 && percent < 66.5)
+                return ActorState.Half2;
+
+            if (percent >= 66.5 && percent < 100)
+                return ActorState.Half1;
+
+            if (percent == 100)
+                return ActorState.Open;
+
+            return ActorState.Closed;
+        }
+
+        public static bool HasError(Transition transition)
+        {
+            EnsureNotNull(transition);
+
+            if (transition.Error)
+                return true;
+
+            return transition.Hcp != null && transition.Hcp.Error;
+        }
+
+        // The app's "hint" is the HCP not-referenced flag.
+        public static bool HasHint(Transition transition)
+        {
+            EnsureNotNull(transition);
+
+            return transition.Hcp != null && transition.Hcp.NotReferenced;
+        }
+
+        public static bool IsOpened(Transition transition)
+        {
+            EnsureNotNull(transition);
+
+            if (transition.Hcp != null)
+                return transition.Hcp.PositionOpen;
+
+            return transition.ActualState == 200;
+        }
+
+        public static bool IsClosed(Transition transition)
+        {
+            EnsureNotNull(transition);
+
+            if (transition.Hcp != null)
+                return transition.Hcp.PositionClose;
+
+            return transition.ActualState == 0;
+        }
+
+        public static bool IsDefinedHalfOpened(Transition transition)
+        {
+            EnsureNotNull(transition);
+
+            if (transition.Gk == (int)ActorClass.Ese)
+                return transition.ActualState == 100;
+
+            return transition.Hcp != null && transition.Hcp.HalfOpen;
+        }
+
+        public static bool IsHalfOpened(Transition transition)
+        {
+            EnsureNotNull(transition);
+
+            if (transition.Hcp != null)
+                return transition.Hcp.HalfOpen;
+
+            return transition.ActualState > 0 && transition.ActualState < 200;
+        }
+
+        public static bool IsDriving(Transition transition)
+        {
+            EnsureNotNull(transition);
+
+            if (transition.Hcp != null)
+                return transition.Hcp.Driving || transition.DriveTime != 0;
+
+            return transition.DriveTime != 0;
+        }
+
+        public static bool IsDrivingToClose(Transition transition)
+        {
+            if (!IsDriving(transition))
+                return false;
+
+            if (transition.Hcp != null)
+                return transition.Hcp.DrivingToClose;
+
+            return transition.ActualState > transition.RequestedState && transition.DriveTime > 0;
+        }
+
+        public static bool IsDrivingToOpen(Transition transition)
+        {
+            if (!IsDriving(transition))
+                return false;
+
+            if (transition.Hcp != null)
+                return !transition.Hcp.DrivingToClose;
+
+            return transition.ActualState < transition.RequestedState && transition.DriveTime > 0;
+        }
+
+        private static void EnsureNotNull(Transition transition)
+        {
+            if (transition == null)
+                throw new ArgumentNullException(nameof(transition));
+        }
     }
 }

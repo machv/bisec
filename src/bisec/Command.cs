@@ -37,6 +37,7 @@ namespace BiSec.Library
     /// <summary>
     /// The protocol between the client and the bisecure gateway uses a 1-byte command to signal whats to be done.
     /// In the result from the GW the command has the 7-th bit set to signal a response.
+    /// Codes and names mirror the legacy app's MCPCommands table.
     /// </summary>
     public class Command
     {
@@ -45,47 +46,99 @@ namespace BiSec.Library
         public static readonly Command Error = new Command(1, "ERROR", false);
         public static readonly Command GetMac = new Command(2, "GET_MAC", false);
         public static readonly Command SetValue = new Command(3, "SET_VALUE");
+        public static readonly Command GetValue = new Command(4, "GET_VALUE");
+        public static readonly Command Debug = new Command(5, "DEBUG");
         public static readonly Command Jmcp = new Command(6, "JMCP");
         public static readonly Command GetGatewayVersion = new Command(7, "GET_GW_VERSION", false);
         public static readonly Command Login = new Command(16, "LOGIN", false);
         public static readonly Command Logout = new Command(17, "LOGOUT");
+        public static readonly Command GetUserIds = new Command(32, "GET_USER_IDS");
+        public static readonly Command GetUserName = new Command(33, "GET_USER_NAME");
+        public static readonly Command AddUser = new Command(34, "ADD_USER");
+        public static readonly Command ChangePassword = new Command(35, "CHANGE_PASSWD");
+        public static readonly Command RemoveUser = new Command(36, "REMOVE_USER");
+        public static readonly Command SetUserRights = new Command(37, "SET_USER_RIGHTS");
         public static readonly Command GetName = new Command(38, "GET_NAME", false);
+        public static readonly Command SetName = new Command(39, "SET_NAME");
+        public static readonly Command GetUserRights = new Command(40, "GET_USER_RIGHTS");
+        public static readonly Command AddPort = new Command(41, "ADD_PORT");
+        public static readonly Command AddGroup = new Command(42, "ADD_GROUP");
+        public static readonly Command RemoveGroup = new Command(43, "REMOVE_GROUP");
+        public static readonly Command SetGroupName = new Command(44, "SET_GROUP_NAME");
+        public static readonly Command GetGroupName = new Command(45, "GET_GROUP_NAME");
+        public static readonly Command SetGroupedPorts = new Command(46, "SET_GROUPED_PORTS");
+        public static readonly Command GetGroupedPorts = new Command(47, "GET_GROUPED_PORTS");
+        public static readonly Command GetPorts = new Command(48, "GET_PORTS");
+        public static readonly Command GetPortType = new Command(49, "GET_TYPE");
+        public static readonly Command GetState = new Command(50, "GET_STATE");
         public static readonly Command SetState = new Command(51, "SET_STATE");
+        public static readonly Command GetPortName = new Command(52, "GET_PORT_NAME");
+        public static readonly Command SetPortName = new Command(53, "SET_PORT_NAME");
+        public static readonly Command SetPortType = new Command(54, "SET_TYPE");
+        public static readonly Command GetGroupIds = new Command(64, "GET_GROUP_IDS");
+        public static readonly Command InheritPort = new Command(65, "INHERIT_PORT");
+        public static readonly Command RemovePort = new Command(66, "REMOVE_PORT");
+        public static readonly Command ChangeUserName = new Command(67, "CHANGE_USER_NAME");
+        public static readonly Command ChangeUserNameOfUser = new Command(68, "CHANGE_USER_NAME_OF_USER");
+        public static readonly Command ChangePasswordOfUser = new Command(69, "CHANGE_PASSWORD_OF_USER");
+        public static readonly Command SetSsl = new Command(80, "SET_SSL");
+        public static readonly Command ScanWifi = new Command(81, "SCAN_WIFI");
+        public static readonly Command WifiFound = new Command(82, "WIFI_FOUND");
+        public static readonly Command GetWifiState = new Command(83, "GET_WIFI_STATE");
         public static readonly Command GetTransition = new Command(112, "HM_GET_TRANSITION");
-        public static readonly Command GET_WIFI_STATE = new Command(83, "GET_WIFI_STATE");
-        public static readonly Command SCAN_WIFI = new Command(81, "SCAN_WIFI");
-        public static readonly Command WIFI_FOUND = new Command(82, "WIFI_FOUND");
-        public static readonly Command GET_PORT_NAME = new Command(52, "GET_PORT_NAME");
-        public static readonly Command SET_PORT_NAME = new Command(53, "SET_PORT_NAME");
-        public static readonly Command ADD_USER = new Command(34, "ADD_USER");
-        public static readonly Command SET_USER_RIGHTS = new Command(37, "SET_USER_RIGHTS");
 
-        public static Command[] Commands = new Command[]
+        public static readonly Command[] Commands = new Command[]
         {
             Empty,
             Ping,
             Error,
             GetMac,
             SetValue,
+            GetValue,
+            Debug,
             Jmcp,
             GetGatewayVersion,
             Login,
             Logout,
+            GetUserIds,
+            GetUserName,
+            AddUser,
+            ChangePassword,
+            RemoveUser,
+            SetUserRights,
             GetName,
+            SetName,
+            GetUserRights,
+            AddPort,
+            AddGroup,
+            RemoveGroup,
+            SetGroupName,
+            GetGroupName,
+            SetGroupedPorts,
+            GetGroupedPorts,
+            GetPorts,
+            GetPortType,
+            GetState,
             SetState,
+            GetPortName,
+            SetPortName,
+            SetPortType,
+            GetGroupIds,
+            InheritPort,
+            RemovePort,
+            ChangeUserName,
+            ChangeUserNameOfUser,
+            ChangePasswordOfUser,
+            SetSsl,
+            ScanWifi,
+            WifiFound,
+            GetWifiState,
             GetTransition,
-            GET_WIFI_STATE,
-            SCAN_WIFI,
-            WIFI_FOUND,
-            GET_PORT_NAME,
-            SET_PORT_NAME,
-            ADD_USER,
-            SET_USER_RIGHTS,
         };
 
-        public int Code { get; set; }
-        public string Name { get; set; }
-        public bool AuthenticationRequired { get; set; }
+        public int Code { get; }
+        public string Name { get; }
+        public bool AuthenticationRequired { get; }
 
         public Command(int code, string name = "UNKNOWN", bool authenticationRequired = true)
         {

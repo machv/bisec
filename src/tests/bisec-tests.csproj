@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\bisec\bisec.csproj" />
+    <ProjectReference Include="..\harness\bisec-harness.csproj" />
   </ItemGroup>
 
 </Project>

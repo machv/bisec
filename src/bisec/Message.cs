@@ -94,9 +94,22 @@ namespace BiSec.Library
             }
         }
 
-        public Error GetError()
+        public bool IsError => Command != null && Command.Code == Command.Error.Code;
+
+        /// <summary>
+        /// The error code of an ERROR message, or null when this is not an ERROR message
+        /// or it carries no payload.
+        /// </summary>
+        public Error? GetError()
         {
-            return (Error)Payload.ToByteArray()[0];
+            if (!IsError)
+                return null;
+
+            byte[] payload = Payload?.ToByteArray();
+            if (payload == null || payload.Length < 1)
+                return null;
+
+            return (Error)payload[0];
         }
 
         private static bool IsBitSet(short b, int pos)

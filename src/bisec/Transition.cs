@@ -28,45 +28,22 @@ namespace BiSec.Library
         public bool AutoClose => _autoClose;
         public bool IgnoreRetries => _ignoreRetries;
         public Hcp Hcp => _hcp;
+        public DateTime Time => _time;
+        public ActorClass ActorClass => ActorClasses.FromGk(_gk);
 
-        public bool IsDriving
-        {
-            get
-            {
-                return _driveTime != 0 || (_hcp?.Driving ?? false);
-            }
-        }
+        public bool IsDriving => TransitionHelper.IsDriving(this);
 
         public DriveDirection? DrivingDirection
         {
             get
             {
-                if (_driveTime == 0 && (_hcp?.Driving ?? false))
-                {
-                    if (_hcp.DrivingToClose)
-                    {
-                        return DriveDirection.TO_CLOSE;
-                    }
-                    else
-                    {
-                        return DriveDirection.TO_OPEN;
-                    }
-                }
-                else if (_driveTime > 0)
-                {
-                    if (_requestedState > _actualState)
-                    {
-                        return DriveDirection.TO_OPEN;
-                    }
-                    else
-                    {
-                        return DriveDirection.TO_CLOSE;
-                    }
-                }
-                else
-                {
-                    return null;
-                }
+                if (TransitionHelper.IsDrivingToClose(this))
+                    return DriveDirection.TO_CLOSE;
+
+                if (TransitionHelper.IsDrivingToOpen(this))
+                    return DriveDirection.TO_OPEN;
+
+                return null;
             }
         }
 
@@ -92,10 +69,13 @@ namespace BiSec.Library
 
                 if ((driveHighAndFlags & 64) > 0)
                     _autoClose = true;
+
+                // APK Parsing.parseHmTransition clears the top nibble only when bit 6 or 7 is set.
+                driveHighAndFlags &= ~240;
             }
 
             if (!_error)
-                _driveTime = ((driveHighAndFlags & ~240) << 8) + driveLow;
+                _driveTime = (driveHighAndFlags << 8) + driveLow;
 
             int gkHigh = bytes[offset++];
             int gkLow = bytes[offset++];
@@ -143,13 +123,14 @@ namespace BiSec.Library
             // APK ActorClasses.ESE = 0x0902 (2306). When the actor is an ESE drive
             // and the transition is otherwise considered driving, the legacy app
             // overrides driveTime to 5 and forces ignoreRetries=true.
-            if (_gk == ActorClassEse && IsDriving)
+            if (_gk == (int)ActorClass.Ese && IsDriving)
             {
                 _driveTime = 5;
                 _ignoreRetries = true;
             }
-        }
 
-        private const int ActorClassEse = 0x0902;
+            // APK Parsing.parseHmTransition ends with IStateHelper.forceTransition, which
+            // hands the transition back unchanged for every state helper.
+        }
     }
 }

@@ -4,6 +4,7 @@ namespace BiSec.Library
 {
     public class DiscoveryResult
     {
+        public string Name { get; set; }
         public string Mac { get; set; }
         public IPAddress SourceAddress { get; set; }
         public string SwVersion { get; set; }

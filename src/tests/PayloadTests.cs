@@ -19,7 +19,7 @@ namespace tests
         [Fact]
         public void GetGroupsForUserPayload()
         {
-            var payload = PayloadFactory.GetGroupsForUser();
+            var payload = PayloadFactory.GetGroupsForUser(1);
 
             Assert.Equal("{\"cmd\":\"GET_GROUPS\", \"forUser\":1}", payload.TextContent);
         }

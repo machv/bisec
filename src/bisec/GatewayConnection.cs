@@ -1,7 +1,6 @@
 ﻿using BiSec.Library.Exceptions;
 using Microsoft.Extensions.Logging;
 using System;
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
@@ -12,53 +11,114 @@ using System.Threading.Tasks;
 
 namespace BiSec.Library
 {
-    public class GatewayConnection
+    public class GatewayConnection : IDisposable
     {
-        private ILogger _logger;
+        public const int DefaultPort = 4000;
 
         const string DefaultToken = "00000000";
         const string DefaultSenderId = "000000000000";
+        const int BroadcastTag = 0xFF;
+        const int TagCount = 128;
+        const int ConnectRetryDelay = 250;
 
-        const int DefaultPort = 4000;
-        const int DefaultSendTimeout = 2000;
-        const int DefaultReadTimeout = 2000;
-
-        private IPAddress _address;
-        private string _senderId;
-        private string _receiverId;
-        private string _token;
-        private int _port;
-
-        protected TcpClient _client;
-        protected NetworkStream _ns;
-        protected CancellationTokenSource _consumeSendingQueueCancellation;
-        protected readonly BlockingCollection<Package> _sendingQueue;
-        protected readonly BlockingCollection<Package> _receivingQueue;
-        protected readonly ConcurrentDictionary<int, PackageQueueItem> _uncofirmedPackages;
-
-        public bool Connected => _client?.Connected ?? false;
-
-        public string Token
+        private sealed class Session
         {
-            get => _token;
+            public TcpClient Client;
+            public NetworkStream Stream;
+            public CancellationTokenSource Cancellation;
+            public int Closed;
         }
 
-        public GatewayConnection(DiscoveryResult disoveryResult) : this(disoveryResult.SourceAddress, "000000000000", disoveryResult.GatewayId)
+        private sealed class PendingRequest
         {
-
+            public Message Request;
+            public Session Session;
+            public TaskCompletionSource<Package> Completion;
         }
 
-        public GatewayConnection(IPAddress address, string senderId, string receiverId)
+        private ILogger _logger;
+
+        private readonly IPAddress _address;
+        private readonly int _port;
+        private readonly string _receiverId;
+        private volatile string _senderId;
+        private volatile string _token;
+        private volatile Session _session;
+
+        // The gateway handles one MCP request at a time, so sends are serialized.
+        private readonly SemaphoreSlim _sendGate = new SemaphoreSlim(1, 1);
+        private readonly ConcurrentDictionary<int, PendingRequest> _unconfirmedPackages = new ConcurrentDictionary<int, PendingRequest>();
+        private readonly object _tagAllocationLock = new object();
+        private int _nextTag;
+
+        public IPAddress Address => _address;
+        public int Port => _port;
+        public string GatewayId => _receiverId;
+        public string ClientId => _senderId;
+        public string Token => _token;
+        public bool IsAuthenticated => _token != DefaultToken;
+
+        public bool Connected
         {
-            _address = address;
-            _senderId = senderId;
-            _receiverId = receiverId;
+            get
+            {
+                Session session = _session;
+                return session != null && session.Closed == 0 && session.Client.Connected;
+            }
+        }
+
+        public RequestTimeouts Timeouts { get; } = new RequestTimeouts();
+
+        /// <summary>
+        /// The total time allowed for connecting. A real gateway was at times slow to accept a
+        /// connection: several seconds, once more than ten, with no pattern found. Within this time
+        /// connecting is attempted repeatedly: an attempt that fails because the host is unreachable,
+        /// or that gets no answer within <see cref="ConnectAttemptTimeout"/>, is replaced by a new one.
+        /// </summary>
+        public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(20);
+
+        /// <summary>
+        /// How long a single connect attempt may stay unanswered; the legacy app's TCP connect timeout.
+        /// A new attempt reaches a gateway that has just become reachable sooner than the operating
+        /// system's own, ever slower, retransmissions would.
+        /// </summary>
+        public TimeSpan ConnectAttemptTimeout { get; set; } = TimeSpan.FromMilliseconds(1500);
+
+        // Replaced in tests to stand in for a gateway that is unreachable at first.
+        internal Func<TcpClient, IPAddress, int, CancellationToken, Task> ConnectSocketAsync { get; set; }
+            = (client, address, port, cancellationToken) => client.ConnectAsync(address, port, cancellationToken).AsTask();
+
+        /// <summary>
+        /// How long the rest of a package may take to arrive once its first bytes are in. A package
+        /// that stalls longer cannot be recovered, so the connection is closed. The legacy app
+        /// gives up on a partial package after the same 500 ms.
+        /// </summary>
+        public TimeSpan PackageCompletionTimeout { get; set; } = TimeSpan.FromMilliseconds(500);
+
+        /// <summary>
+        /// Raised for every package received with a valid token, on the receive loop.
+        /// Handlers must not block.
+        /// </summary>
+        public event EventHandler<PackageReceivedEventArgs> PackageReceived;
+
+        /// <summary>
+        /// Raised when the gateway pushes a LOGOUT (tag 0xFF), ending the session.
+        /// </summary>
+        public event EventHandler LoggedOut;
+
+        public event EventHandler Disconnected;
+
+        public GatewayConnection(DiscoveryResult disoveryResult) : this(disoveryResult.SourceAddress, DefaultSenderId, disoveryResult.GatewayId)
+        {
+        }
+
+        public GatewayConnection(IPAddress address, string senderId, string receiverId, int port = DefaultPort)
+        {
+            _address = address ?? throw new ArgumentNullException(nameof(address));
+            _senderId = senderId ?? DefaultSenderId;
+            _receiverId = receiverId ?? throw new ArgumentNullException(nameof(receiverId));
+            _port = port;
             _token = DefaultToken;
-            _port = DefaultPort;
-
-            _sendingQueue = new BlockingCollection<Package>();
-            _receivingQueue = new BlockingCollection<Package>();
-            _uncofirmedPackages = new ConcurrentDictionary<int, PackageQueueItem>();
         }
 
         public void SetLogger(ILogger logger)
@@ -68,259 +128,448 @@ namespace BiSec.Library
 
         public void Connect()
         {
-            _client = new TcpClient(_address.ToString(), _port);
-            _ns = _client.GetStream();
+            ConnectAsync().GetAwaiter().GetResult();
+        }
 
-            ThreadPool.QueueUserWorkItem(new WaitCallback(ProcessOutgoing));
-            ThreadPool.QueueUserWorkItem(new WaitCallback(ProcessIncoming));
+        public async Task ConnectAsync(CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (Connected)
+                return;
+
+            TcpClient client = null;
+            string lastFailure = null;
+
+            using (CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeout.CancelAfter(ConnectTimeout);
+                try
+                {
+                    while (true)
+                    {
+                        client = new TcpClient();
+                        using (CancellationTokenSource attempt = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token))
+                        {
+                            attempt.CancelAfter(ConnectAttemptTimeout);
+                            try
+                            {
+                                await ConnectSocketAsync(client, _address, _port, attempt.Token).ConfigureAwait(false);
+                                break;
+                            }
+                            catch (SocketException e) when (e.SocketErrorCode == SocketError.HostUnreachable || e.SocketErrorCode == SocketError.NetworkUnreachable)
+                            {
+                                lastFailure = e.Message;
+                                client.Dispose();
+                                _logger?.LogDebug($"Gateway {_address} is not reachable yet ({e.Message}); trying again.");
+                                await Task.Delay(ConnectRetryDelay, timeout.Token).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException) when (!timeout.IsCancellationRequested)
+                            {
+                                lastFailure = $"no answer within {ConnectAttemptTimeout.TotalMilliseconds:0} ms";
+                                client.Dispose();
+                                _logger?.LogDebug($"Gateway {_address} did not answer the connect attempt; trying again.");
+                            }
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    client?.Dispose();
+                    string detail = lastFailure == null ? "" : $" Last error: {lastFailure}.";
+                    throw new TimeoutException($"Connecting to gateway {_address}:{_port} timed out after {ConnectTimeout.TotalMilliseconds:0} ms.{detail}");
+                }
+                catch
+                {
+                    client?.Dispose();
+                    throw;
+                }
+            }
+
+            Session session = new Session
+            {
+                Client = client,
+                Stream = client.GetStream(),
+                Cancellation = new CancellationTokenSource(),
+            };
+
+            _token = DefaultToken;
+            _session = session;
+
+            _ = Task.Run(() => ReceiveLoopAsync(session));
         }
 
         public void Disconnect()
         {
-            TerminateSession();
-        }
-
-        private void ProcessOutgoing(object state)
-        {
-            _consumeSendingQueueCancellation = new CancellationTokenSource();
-
-            while (_client.Connected)
-            {
-                try
-                {
-                    foreach (Package message in _sendingQueue.GetConsumingEnumerable(_consumeSendingQueueCancellation.Token))
-                    {
-                        if (message != null)
-                        {
-                            if (message.Message.Command == Command.Login)
-                            {
-                                // if there is new login, reset the previous token authorization
-                                _token = DefaultToken;
-                            }
-
-                            if (_token == DefaultToken && message.Message.Command.AuthenticationRequired)
-                            {
-                                // Message to be sent, but not authenticated! Ignoring message...
-                                continue;
-                            }
-
-                            // set the authorization
-                            message.Message.Token = _token;
-                            var package = new Package(_senderId, message.Receiver, message.Message);
-
-                            WriteMessage(_ns, package);
-                        }
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    // reading cancelled -> quit this thread
-                    break;
-                }
-            }
-        }
-
-        private async void ProcessIncoming(object state)
-        {
-            while (_client.Connected)
-            {
-                byte[] packageBytes = null;
-
-                packageBytes = await ReadPackage().ConfigureAwait(false);
-
-                if (packageBytes == null)
-                {
-                    // connection was terminated -> end processing of incoming messages.
-                    return;
-                }
-                Package package = Package.Load(packageBytes);
-
-                _logger?.LogDebug($"Decoded package: Command = {package.Message.Command}, Tag = {package.Message.Tag}");
-
-                if (package.Message.Command == Command.Login)
-                {
-                    _senderId = package.Receiver;
-                    _token = StringHelper.HexStringFromByteArray(package.Message.Payload.ToByteArray()).Substring(2);
-                }
-
-                try
-                {
-                    // Check if the recieved message is confirming previous one
-                    PackageQueueItem unconfirmed = null;
-                    _uncofirmedPackages.TryGetValue(package.Message.Tag, out unconfirmed);
-                    if (unconfirmed != null)
-                    {
-                        unconfirmed.SetResult(package);
-
-                        PackageQueueItem removed;
-                        _uncofirmedPackages.TryRemove(package.Message.Tag, out removed);
-                    }
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine(e.Message);
-                }
-            }
-        }
-
-        protected async Task<byte[]> ReadPackage()
-        {
-            int bytesCount = Lengths.ADDRESS_SIZE + Lengths.ADDRESS_SIZE + Lengths.LENGTH_SIZE;
-            byte[] headerBuffer = new byte[bytesCount];
-            
-            int length;
-            try
-            {
-                length = await _ns.ReadAsync(headerBuffer, 0, bytesCount).ConfigureAwait(false);
-            }
-            catch (IOException e)
-            {
-                _logger?.LogError($"Exception occured while reading package header ({e.Message}) -> closing the session.");
-
-                TerminateSession();
-
-                return null;
-            }
-
-            if (length < bytesCount)
-                throw new InvalidPackageLengthException("Received bytes are too short for a complete package.");
-
-            var rawPackageHeader = ConversionHelper.GatewayPayloadToByteArray(headerBuffer);
-
-            short bodyLength = BinaryPrimitives.ReadInt16BigEndian(rawPackageHeader[12..14]); // body length
-
-            int remainingDataLength = (bodyLength + Lengths.CHECKSUM_BYTES - Lengths.LENGTH_BYTES) * Lengths.BYTE_LENGTH; // body length + checksum (1 byte) - length (2 bytes) * 2 (encoding)
-            byte[] messageBuffer = new byte[remainingDataLength];
-            length = await _ns.ReadAsync(messageBuffer, 0, remainingDataLength).ConfigureAwait(false);
-
-            if (length != remainingDataLength)
-                throw new Exception("Read bytes length differs from expected length.");
-
-            int messageLength = headerBuffer.Length + messageBuffer.Length;
-            byte[] message = new byte[messageLength];
-
-            Array.Copy(headerBuffer, message, headerBuffer.Length);
-            Array.Copy(messageBuffer, 0, message, headerBuffer.Length, messageBuffer.Length);
-
-            string receivedMessage = Encoding.UTF8.GetString(message);
-            _logger?.LogTrace($"Received package: {receivedMessage}");
-
-            return message;
-        }
-
-        protected void WriteMessage(NetworkStream stream, Package tc)
-        {
-            if (stream == null)
-                throw new ArgumentNullException();
-
-            if (tc == null)
-                throw new ArgumentNullException();
-
-            byte[] data = tc.ToByteArray();
-
-            string hexString = StringHelper.HexStringFromByteArray(data);
-            byte[] toSend = hexString.ToByteArray();
-
-            try
-            {
-                stream.Write(toSend, 0, toSend.Length);
-            }
-            catch (IOException e)
-            {
-                //_logger?.Error(string.Format("Exception occured while writing PDU ({0}) -> closing session.", e.Message));
-
-                TerminateSession();
-            }
-        }
-
-        protected void TerminateSession()
-        {
-            //if (_state == ConnectionState.Closed) // if already disposed, we can ignore it
-            //    return;
-
-            Dispose();
-
-            // clear working data
-            _sendingQueue.CompleteAdding();
-            _consumeSendingQueueCancellation.Cancel();
+            Close(_session, new IOException("The gateway connection was closed locally."));
         }
 
         public void Dispose()
         {
-            //if (_state == ConnectionState.Closed)
-            //    return;
-
-            //_state = ConnectionState.Closed;
-
-            _client.Client.Shutdown(SocketShutdown.Send);
+            Disconnect();
         }
 
-
-        public void Send(Message message)
+        /// <summary>
+        /// Forgets the session token without waiting for the gateway to confirm a logout.
+        /// </summary>
+        internal void ClearToken()
         {
-            if (_token == DefaultToken && message.Command.AuthenticationRequired)
+            _token = DefaultToken;
+        }
+
+        /// <summary>
+        /// Sends a request and completes with the matching response. Sets the tag and token on
+        /// <paramref name="message"/>. Throws <see cref="TimeoutException"/> when the gateway does not
+        /// answer in time and <see cref="IOException"/> when the connection drops while waiting.
+        /// </summary>
+        public async Task<Package> SendAsync(Message message, CancellationToken cancellationToken = default(CancellationToken))
+        {
+            if (message == null)
+                throw new ArgumentNullException(nameof(message));
+
+            await _sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                Console.WriteLine("Message to be sent, but not authenticated! Ignoring message...");
+                Session session = _session;
+                if (session == null || session.Closed != 0)
+                    throw new InvalidOperationException("The gateway connection is not open. Call ConnectAsync first.");
+
+                if (message.Command == Command.Login)
+                {
+                    // if there is new login, reset the previous token authorization
+                    _token = DefaultToken;
+                }
+
+                if (_token == DefaultToken && message.Command.AuthenticationRequired)
+                    throw new InvalidOperationException("Message requires authentication, but the gateway connection has no active token.");
+
+                PendingRequest pending = new PendingRequest
+                {
+                    Request = message,
+                    Session = session,
+                    Completion = new TaskCompletionSource<Package>(TaskCreationOptions.RunContinuationsAsynchronously),
+                };
+
+                int tag = AllocateTag(pending);
+                try
+                {
+                    message.Tag = (byte)tag;
+                    message.Token = _token;
+                    Package package = new Package(_senderId, _receiverId, message);
+
+                    await WritePackageAsync(session, package, cancellationToken).ConfigureAwait(false);
+
+                    int timeout = Timeouts.Get(message.Command);
+                    try
+                    {
+                        return await pending.Completion.Task.WaitAsync(TimeSpan.FromMilliseconds(timeout), cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        throw new TimeoutException($"Request {message.Command.Name} (Tag: {tag}) timed out after {timeout} ms.");
+                    }
+                }
+                finally
+                {
+                    _unconfirmedPackages.TryRemove(tag, out _);
+                }
+            }
+            finally
+            {
+                _sendGate.Release();
+            }
+        }
+
+        private async Task WritePackageAsync(Session session, Package package, CancellationToken cancellationToken)
+        {
+            string hexString = StringHelper.HexStringFromByteArray(package.ToByteArray());
+            byte[] toSend = Encoding.ASCII.GetBytes(hexString);
+
+            _logger?.LogTrace($"Sending package: {hexString}");
+
+            try
+            {
+                await session.Stream.WriteAsync(toSend, 0, toSend.Length, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is IOException || e is ObjectDisposedException || e is SocketException)
+            {
+                IOException failure = new IOException("Sending to the gateway failed; the connection was closed.", e);
+                Close(session, failure);
+                throw failure;
+            }
+        }
+
+        private async Task ReceiveLoopAsync(Session session)
+        {
+            CancellationToken cancellationToken = session.Cancellation.Token;
+            Exception failure = null;
+
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    byte[] frame = await ReadFrameAsync(session.Stream, PackageCompletionTimeout, cancellationToken).ConfigureAwait(false);
+
+                    Package package;
+                    try
+                    {
+                        if (!IsHex(frame, 0, frame.Length))
+                            throw new FormatException("The frame contains characters that are not hexadecimal digits.");
+
+                        _logger?.LogTrace($"Received package: {Encoding.ASCII.GetString(frame)}");
+                        package = Package.Load(frame);
+                    }
+                    catch (Exception e) when (!(e is OperationCanceledException))
+                    {
+                        // The frame boundaries were intact, so only this package is lost.
+                        _logger?.LogWarning($"Ignoring malformed package from gateway: {e.Message}");
+                        continue;
+                    }
+
+                    HandlePackage(package);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (EndOfStreamException e)
+            {
+                failure = new IOException("The gateway closed the connection.", e);
+            }
+            catch (InvalidPackageLengthException e)
+            {
+                // Without a trustworthy length there is no way to find the next frame.
+                failure = new IOException("The gateway stream is out of sync; the connection was closed.", e);
+                _logger?.LogError($"Receive stream out of sync ({e.Message}) -> closing the session.");
+            }
+            catch (Exception e)
+            {
+                failure = new IOException("Receiving from the gateway failed; the connection was closed.", e);
+                _logger?.LogError($"Exception occured while reading package ({e.Message}) -> closing the session.");
+            }
+            finally
+            {
+                Close(session, failure ?? new IOException("The gateway connection was closed."));
+            }
+        }
+
+        private static async Task<byte[]> ReadFrameAsync(Stream stream, TimeSpan completionTimeout, CancellationToken cancellationToken)
+        {
+            int headerSize = Lengths.ADDRESS_SIZE + Lengths.ADDRESS_SIZE + Lengths.LENGTH_SIZE;
+            byte[] header = new byte[headerSize];
+
+            // Waiting for a package to begin has no limit; only its completion does.
+            int started = await stream.ReadAsync(header, 0, headerSize, cancellationToken).ConfigureAwait(false);
+            if (started == 0)
+                throw new EndOfStreamException();
+
+            await ReadRestAsync(stream, header, started, headerSize - started, completionTimeout, cancellationToken).ConfigureAwait(false);
+
+            if (!IsHex(header, 0, headerSize))
+                throw new InvalidPackageLengthException("The package header is not hexadecimal text.");
+
+            int bodyLength = 0;
+            for (int i = headerSize - Lengths.LENGTH_SIZE; i < headerSize; i++)
+                bodyLength = (bodyLength << 4) | StringHelper.GetHexValue(header[i]);
+
+            if (bodyLength < Lengths.MinimalMessageBytes)
+                throw new InvalidPackageLengthException($"The package announces a body of {bodyLength} bytes, less than the minimum of {Lengths.MinimalMessageBytes}.");
+
+            // body length + checksum (1 byte) - length (2 bytes) * 2 (encoding)
+            int remaining = (bodyLength + Lengths.CHECKSUM_BYTES - Lengths.LENGTH_BYTES) * Lengths.BYTE_LENGTH;
+            byte[] frame = new byte[headerSize + remaining];
+            Array.Copy(header, frame, headerSize);
+            await ReadRestAsync(stream, frame, headerSize, remaining, completionTimeout, cancellationToken).ConfigureAwait(false);
+
+            return frame;
+        }
+
+        // Reads the remainder of a package that has started; each chunk must arrive within the timeout.
+        private static async Task ReadRestAsync(Stream stream, byte[] buffer, int offset, int count, TimeSpan completionTimeout, CancellationToken cancellationToken)
+        {
+            int total = 0;
+            while (total < count)
+            {
+                int read;
+                using (CancellationTokenSource stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                {
+                    stall.CancelAfter(completionTimeout);
+                    try
+                    {
+                        read = await stream.ReadAsync(buffer, offset + total, count - total, stall.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        throw new InvalidPackageLengthException($"A package stopped arriving after {offset + total} characters.");
+                    }
+                }
+
+                if (read == 0)
+                    throw new EndOfStreamException();
+
+                total += read;
+            }
+        }
+
+        private void HandlePackage(Package package)
+        {
+            Message message = package.Message;
+
+            _logger?.LogDebug($"Decoded package: Command = {message.Command}, Tag = {message.Tag}");
+
+            // Same order as the legacy app's MCPPackageQueue.packageReceive_handler:
+            // the token is judged first, then LOGIN/LOGOUT may replace it.
+            bool validToken = IsValidToken(message.Token);
+
+            if (message.Command == Command.Login && message.IsResponse)
+            {
+                _token = ReadLoginToken(message.Payload.ToByteArray());
+            }
+            else if (message.Command == Command.Logout)
+            {
+                _token = DefaultToken;
+                if (message.Tag == BroadcastTag)
+                    Raise(LoggedOut);
+            }
+
+            if (!validToken)
+            {
+                _logger?.LogInformation($"Received package with invalid token for command {message.Command}; ignoring.");
                 return;
             }
 
-            Package package = new Package(_senderId, _receiverId, message);
-            QueuePdu(package);
-        }
+            // WIFI_FOUND is a notification by definition; it must never complete a request.
+            PendingRequest pending = null;
+            bool unsolicited = message.Tag == BroadcastTag
+                || message.Command == Command.WifiFound
+                || !_unconfirmedPackages.TryGetValue(message.Tag, out pending);
 
-        protected void QueuePdu(Package message)
-        {
-            TaskCompletionSource<Package> tcs = new TaskCompletionSource<Package>();
-            PackageQueueItem<Package> item = new PackageQueueItem<Package>(message, tcs);
-
-            QueuePackage(item);
-        }
-
-        protected void QueuePackage(PackageQueueItem queueItem)
-        {
-            if (queueItem == null)
-                throw new ArgumentNullException("queueItem");
-
-            if (queueItem.Package == null)
-                throw new ArgumentNullException("queueItem.Package");
-
-            // Add message for confirmation
-            _uncofirmedPackages.TryAdd(queueItem.Package.Message.Tag, queueItem);
-
-            // And then send it
-            _sendingQueue.Add(queueItem.Package);
-        }
-
-        public Message Read(int tag)
-        {
-            _uncofirmedPackages.TryGetValue(tag, out PackageQueueItem queueItem);
-
-            throw new NotImplementedException();
-        }
-
-        public Task<Package> GetResponseAsync(int tag, CancellationToken cancellationToken = default(CancellationToken))
-        {
-            return GetResponseAsync<Package>(tag, cancellationToken);
-        }
-
-        public Task<T> GetResponseAsync<T>(int tag, CancellationToken cancellationToken = default(CancellationToken)) where T : Package
-        {
-            _uncofirmedPackages.TryGetValue(tag, out PackageQueueItem queueItem);
-
-            if (queueItem is PackageQueueItem<T> item)
+            if (unsolicited)
             {
-                if (cancellationToken != null)
-                {
-                    cancellationToken.Register(() =>
-                    {
-                        item.TaskCompletionSource.TrySetCanceled(cancellationToken);
-                    });
-                }
-
-                return item.TaskCompletionSource.Task;
+                _logger?.LogDebug($"Received unsolicited package {message.Command} (Tag: {message.Tag}).");
+            }
+            else
+            {
+                // The gateway addresses responses to the client id it assigned to this connection.
+                _senderId = package.Receiver;
             }
 
-            throw new InvalidOperationException("Cannot find message in the queue.");
+            EventHandler<PackageReceivedEventArgs> handler = PackageReceived;
+            if (handler != null)
+            {
+                try
+                {
+                    handler(this, new PackageReceivedEventArgs(package, unsolicited));
+                }
+                catch (Exception e)
+                {
+                    _logger?.LogError($"A PackageReceived handler failed: {e.Message}");
+                }
+            }
+
+            // Completed after the event, so whoever awaits the response knows its event has been delivered.
+            if (!unsolicited)
+                pending.Completion.TrySetResult(package);
+        }
+
+        private void Close(Session session, Exception reason)
+        {
+            if (session == null || Interlocked.Exchange(ref session.Closed, 1) != 0)
+                return;
+
+            try
+            {
+                session.Cancellation.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            session.Client.Dispose();
+
+            // A newer session may already be in place; its token and requests are not this one's to touch.
+            if (ReferenceEquals(_session, session))
+                _token = DefaultToken;
+
+            foreach (PendingRequest pending in _unconfirmedPackages.Values)
+            {
+                if (ReferenceEquals(pending.Session, session))
+                    pending.Completion.TrySetException(reason);
+            }
+
+            Raise(Disconnected);
+        }
+
+        private void Raise(EventHandler handler)
+        {
+            if (handler == null)
+                return;
+
+            try
+            {
+                handler(this, EventArgs.Empty);
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError($"A connection event handler failed: {e.Message}");
+            }
+        }
+
+        // Tags rotate instead of reusing the lowest free one, so that a late answer to a request
+        // that timed out cannot be taken for the answer to the next request.
+        private int AllocateTag(PendingRequest request)
+        {
+            lock (_tagAllocationLock)
+            {
+                for (int i = 0; i < TagCount; i++)
+                {
+                    int tag = (_nextTag + i) % TagCount;
+                    if (_unconfirmedPackages.TryAdd(tag, request))
+                    {
+                        _nextTag = (tag + 1) % TagCount;
+                        return tag;
+                    }
+                }
+            }
+
+            throw new InvalidOperationException("No free MCP package tag is available.");
+        }
+
+        private bool IsValidToken(string token)
+        {
+            return string.Equals(NormalizeToken(token), DefaultToken, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(NormalizeToken(token), NormalizeToken(_token), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string NormalizeToken(string token)
+        {
+            return string.IsNullOrWhiteSpace(token)
+                ? DefaultToken
+                : token.PadLeft(DefaultToken.Length, '0').ToUpperInvariant();
+        }
+
+        private static string ReadLoginToken(byte[] payload)
+        {
+            if (payload == null || payload.Length < 4)
+                return DefaultToken;
+
+            // LOGIN response payload: [userId][token:4]
+            int offset = payload.Length >= 5 ? 1 : 0;
+            byte[] tokenBytes = new byte[4];
+            Array.Copy(payload, offset, tokenBytes, 0, tokenBytes.Length);
+
+            return StringHelper.HexStringFromByteArray(tokenBytes);
+        }
+
+        private static bool IsHex(byte[] buffer, int offset, int count)
+        {
+            for (int i = offset; i < offset + count; i++)
+            {
+                byte b = buffer[i];
+                bool hex = (b >= '0' && b <= '9') || (b >= 'A' && b <= 'F') || (b >= 'a' && b <= 'f');
+                if (!hex)
+                    return false;
+            }
+
+            return true;
         }
     }
 }

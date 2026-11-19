@@ -1,143 +1,233 @@
-﻿using System;
+﻿using Microsoft.Extensions.Logging;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
+using System.Xml;
 using System.Xml.Linq;
 
 namespace BiSec.Library
 {
     public class GatewayDiscovery
     {
-        private class DiscoveryState
-        {
-            private UdpClient _udpClient;
-            private IPEndPoint _ipEndpoint;
-            private GatewayDiscovery _discovery;
+        public const int RequestPort = 4001;
+        public const int ListenPort = 4002;
 
-            public UdpClient UdpClient
-            {
-                get => _udpClient;
-                set => _udpClient = value;
-            }
-            public IPEndPoint IPEndPoint
-            {
-                get => _ipEndpoint;
-                set => _ipEndpoint = value;
-            }
-            public GatewayDiscovery Discovery
-            {
-                get => _discovery;
-                set => _discovery = value;
-            }
+        public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(3);
+
+        private const string DiscoveryRequest = "<Discover target=\"LogicBox\" />";
+        private const int MaxDatagramSize = 65535;
+
+        private readonly IPEndPoint _listenEndPoint;
+        private readonly IPEndPoint[] _requestTargets;
+        private readonly ILogger _logger;
+
+        public GatewayDiscovery() : this((ILogger)null) { }
+
+        public GatewayDiscovery(ILogger logger) : this(new IPEndPoint(IPAddress.Any, ListenPort), null, logger) { }
+
+        // Lets tests run on loopback with their own ports. Null requestTargets selects the default broadcast targets.
+        internal GatewayDiscovery(IPEndPoint listenEndPoint, IEnumerable<IPEndPoint> requestTargets, ILogger logger = null)
+        {
+            _listenEndPoint = listenEndPoint ?? throw new ArgumentNullException(nameof(listenEndPoint));
+            _requestTargets = requestTargets?.ToArray();
+            _logger = logger;
         }
 
-        public static ManualResetEvent discoveryCompleted = new ManualResetEvent(false);
-
-        private UdpClient _udpClient;
-        private DiscoveryResult _discoveryData;
-
-        private const int _listenPort = 4002;
-        private bool _messageReceived = false;
-
-        public bool MessageReceived
+        /// <summary>
+        /// Broadcasts a discovery request and collects the answers for the whole <paramref name="timeout"/>
+        /// (<see cref="DefaultTimeout"/> when null).
+        /// </summary>
+        /// <returns>Every gateway that answered, once per MAC address, in order of arrival.</returns>
+        /// <exception cref="SocketException">The listen port is in use or no request could be sent.</exception>
+        /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+        public async Task<IReadOnlyList<DiscoveryResult>> DiscoverAsync(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
-            get => _messageReceived;
-            internal set => _messageReceived = value;
+            return await DiscoverCoreAsync(timeout, false, cancellationToken).ConfigureAwait(false);
         }
 
-        public DiscoveryResult DiscoveryData
+        /// <summary>
+        /// Blocks until the first gateway answers and returns it, or null when none answers within <paramref name="timeout"/>.
+        /// </summary>
+        public DiscoveryResult Discover(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
-            internal set
+            return DiscoverCoreAsync(timeout, true, cancellationToken).GetAwaiter().GetResult().FirstOrDefault();
+        }
+
+        private async Task<List<DiscoveryResult>> DiscoverCoreAsync(TimeSpan? timeout, bool stopAtFirst, CancellationToken cancellationToken)
+        {
+            TimeSpan window = timeout ?? DefaultTimeout;
+            if (window < TimeSpan.Zero)
+                throw new ArgumentOutOfRangeException(nameof(timeout), "Discovery timeout must not be negative.");
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var results = new List<DiscoveryResult>();
+            var knownGateways = new HashSet<string>(StringComparer.Ordinal);
+
+            using (var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+            using (var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                _discoveryData = value;
+                socket.EnableBroadcast = true;
+                socket.Bind(_listenEndPoint);
+
+                await SendDiscoveryRequestAsync(socket, cancellationToken).ConfigureAwait(false);
+
+                windowCts.CancelAfter(window);
+
+                byte[] buffer = new byte[MaxDatagramSize];
+                EndPoint anySource = new IPEndPoint(IPAddress.Any, 0);
+
+                try
+                {
+                    while (true)
+                    {
+                        SocketReceiveFromResult received;
+                        try
+                        {
+                            received = await socket.ReceiveFromAsync(buffer.AsMemory(), SocketFlags.None, anySource, windowCts.Token).ConfigureAwait(false);
+                        }
+                        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionReset)
+                        {
+                            // Windows reports an ICMP "port unreachable" for an earlier send on the next receive.
+                            continue;
+                        }
+
+                        IPAddress sourceAddress = ((IPEndPoint)received.RemoteEndPoint).Address;
+                        string response = Encoding.UTF8.GetString(buffer, 0, received.ReceivedBytes);
+
+                        DiscoveryResult result;
+                        try
+                        {
+                            result = ParseDiscoveryResponse(response, sourceAddress);
+                        }
+                        catch (Exception ex) when (ex is XmlException || ex is FormatException)
+                        {
+                            _logger?.LogWarning($"Ignoring invalid discovery response from {sourceAddress} ({ex.Message}): {response}");
+                            continue;
+                        }
+
+                        if (!knownGateways.Add(result.GatewayId))
+                            continue;
+
+                        results.Add(result);
+
+                        if (stopAtFirst)
+                            break;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Only the end of the listening window is expected here.
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
             }
-            get { return _discoveryData; }
+
+            return results;
         }
 
-        public GatewayDiscovery()
+        private async Task SendDiscoveryRequestAsync(Socket socket, CancellationToken cancellationToken)
         {
-            _udpClient = new UdpClient();
-            _udpClient.EnableBroadcast = true;
+            byte[] data = Encoding.ASCII.GetBytes(DiscoveryRequest);
+
+            bool sent = false;
+            SocketException lastError = null;
+
+            foreach (IPEndPoint target in _requestTargets ?? GetBroadcastTargets())
+            {
+                try
+                {
+                    await socket.SendToAsync(data.AsMemory(), SocketFlags.None, target, cancellationToken).ConfigureAwait(false);
+                    sent = true;
+                }
+                catch (SocketException ex)
+                {
+                    lastError = ex;
+                    _logger?.LogWarning($"Sending discovery request to {target} failed: {ex.Message}");
+                }
+            }
+
+            if (!sent && lastError != null)
+                ExceptionDispatchInfo.Throw(lastError);
         }
 
-        private static void ReceiveCallback(IAsyncResult ar)
+        private IPEndPoint[] GetBroadcastTargets()
         {
-            DiscoveryState state = (DiscoveryState)ar.AsyncState;
+            var addresses = new List<IPAddress>();
 
-            UdpClient u = state.UdpClient;
-            IPEndPoint e = state.IPEndPoint;
-
-            byte[] receiveBytes = u.EndReceive(ar, ref e);
-            string receiveString = Encoding.ASCII.GetString(receiveBytes);
-
-            //Console.WriteLine($"Received: {receiveString}");
             try
             {
-                var xml = XElement.Parse(receiveString);
-
-                state.Discovery._discoveryData = new DiscoveryResult()
-                {
-                    HwVersion = xml.Attribute("hwVersion").Value,
-                    SwVersion = xml.Attribute("swVersion").Value,
-                    Mac = xml.Attribute("mac").Value,
-                    Protocol = xml.Attribute("protocol").Value,
-                    SourceAddress = e.Address,
-                };
-
-                state.Discovery.MessageReceived = true;
-
-                // Signal the main thread to continue.  
-                discoveryCompleted.Set();
+                addresses.AddRange(NetworkHelper.GetInterfaceBroadcasts());
             }
-            catch { }
+            catch (NetworkInformationException ex)
+            {
+                _logger?.LogWarning($"Reading the network interfaces failed ({ex.Message}); using the limited broadcast address only.");
+            }
+
+            // The limited broadcast is what the BiSecur app sends; the directed ones reach interfaces it is not routed to.
+            addresses.Add(IPAddress.Broadcast);
+
+            return addresses.Distinct().Select(address => new IPEndPoint(address, RequestPort)).ToArray();
         }
 
-        public void StartListener()
+        internal static DiscoveryResult ParseDiscoveryResponse(string response, IPAddress sourceAddress)
         {
-            IPEndPoint e = new IPEndPoint(IPAddress.Any, _listenPort);
-            UdpClient u = new UdpClient(e);
+            var xml = XElement.Parse(response);
 
-            DiscoveryState s = new DiscoveryState
+            string mac = GetValue(xml, "mac");
+            string protocol = GetValue(xml, "protocol") ?? GetValue(xml, "protocolVersion");
+            string hwVersion = GetValue(xml, "hwVersion");
+            string swVersion = GetValue(xml, "swVersion");
+
+            if (string.IsNullOrWhiteSpace(mac))
+                mac = FindMacLikeValue(xml);
+
+            if (string.IsNullOrWhiteSpace(mac))
+                throw new FormatException("Discovery response does not contain a gateway MAC address.");
+
+            return new DiscoveryResult()
             {
-                IPEndPoint = e,
-                UdpClient = u,
-                Discovery = this
+                HwVersion = hwVersion,
+                SwVersion = swVersion,
+                Mac = mac,
+                Protocol = protocol,
+                SourceAddress = sourceAddress,
             };
-
-            u.BeginReceive(new AsyncCallback(ReceiveCallback), s);
         }
 
-        protected void SendDiscoveryRequest()
+        private static string GetValue(XElement xml, string name)
         {
-            string message = "<Discover target=\"LogicBox\"/>";
-            byte[] data = Encoding.ASCII.GetBytes(message);
-
-            Socket s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-            s.EnableBroadcast = true;
-
-            var broadcasts = NetworkHelper.GetInterfaceBroadcasts();
-            foreach (var broadcastIp in broadcasts)
+            foreach (var element in xml.DescendantsAndSelf())
             {
-                IPEndPoint endpoint = new IPEndPoint(broadcastIp, 4001);
-                s.SendTo(data, endpoint);
+                foreach (var attribute in element.Attributes())
+                {
+                    if (string.Equals(attribute.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))
+                        return attribute.Value;
+                }
+
+                if (string.Equals(element.Name.LocalName, name, StringComparison.OrdinalIgnoreCase))
+                    return element.Value;
             }
 
-            s.Close();
+            return null;
         }
 
-        public DiscoveryResult Discover()
+        private static string FindMacLikeValue(XElement xml)
         {
-            // Set the event to nonsignaled state.  
-            discoveryCompleted.Reset();
+            foreach (var element in xml.DescendantsAndSelf())
+            {
+                string value = element.Value?.Trim();
+                if (!string.IsNullOrWhiteSpace(value) && value.Split(':').Length == 6)
+                    return value;
+            }
 
-            StartListener();
-            SendDiscoveryRequest();
-
-            // Wait until a discovery is completed before continuing.  
-            discoveryCompleted.WaitOne();
-
-            return _discoveryData;
+            return null;
         }
     }
 }

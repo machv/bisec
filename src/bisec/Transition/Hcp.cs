@@ -1,9 +1,6 @@
-﻿using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Text;
+﻿using System.Collections;
 
-namespace BiSec
+namespace BiSec.Library
 {
     public class Hcp
     {
@@ -19,12 +16,17 @@ namespace BiSec
         bool _learned;
         bool _notReferenced;
 
-        public bool Driving => _driving;
-        public bool DrivingToClose => _drivingToClose;
-        public bool PositionClose => _positionClose;
         public bool PositionOpen => _positionOpen;
-
+        public bool PositionClose => _positionClose;
+        public bool OptionRelais => _optionRelais;
+        public bool LightBarrier => _lightBarrier;
+        public bool Error => _error;
+        public bool DrivingToClose => _drivingToClose;
+        public bool Driving => _driving;
         public bool HalfOpen => _halfOpened;
+        public bool ForecastLeadTime => _forecastLeadTime;
+        public bool Learned => _learned;
+        public bool NotReferenced => _notReferenced;
 
         public Hcp(byte[] bytes)
         {

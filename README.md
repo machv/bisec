@@ -79,9 +79,10 @@ Remote access through the Hörmann portal is not implemented.
 - `GatewayDiscovery.Discover()` returns null when no gateway answers within the timeout;
   `DiscoverAsync()` returns all of them.
 - Request timeouts follow the app: 15 s by default instead of 5 s (`GatewayConnection.Timeouts`).
-- Connecting is limited to 5 s (`GatewayConnection.ConnectTimeout`) and is repeated within that
-  time while the gateway is unreachable; a real gateway was seen to be unreachable for about
-  3 s now and then.
+- Connecting is limited to 20 s (`GatewayConnection.ConnectTimeout`). Within that time an
+  attempt that fails because the gateway is unreachable, or that gets no answer for 1.5 s, is
+  replaced by a new one; a real gateway was at times slow to accept a connection, several
+  seconds and once more than ten.
 
 ## Trying it against a real gateway
 

@@ -209,6 +209,53 @@ namespace tests
         }
 
         [Fact]
+        public async Task UnansweredConnectAttemptIsReplacedByANewOne()
+        {
+            using var gateway = new FakeGateway();
+            using var connection = GatewayTestSession.CreateConnection(gateway);
+            connection.ConnectAttemptTimeout = TimeSpan.FromMilliseconds(150);
+
+            int attempts = 0;
+            var connect = connection.ConnectSocketAsync;
+            connection.ConnectSocketAsync = (client, address, port, cancellationToken) =>
+            {
+                // The first two attempts hang the way a connect does while nothing answers.
+                if (++attempts <= 2)
+                    return Task.Delay(Timeout.Infinite, cancellationToken);
+
+                return connect(client, address, port, cancellationToken);
+            };
+
+            await connection.ConnectAsync().WaitAsync(Guard);
+            Package response = await connection.SendAsync(Ping()).WaitAsync(Guard);
+
+            Assert.Equal(3, attempts);
+            Assert.Equal(Command.Ping, response.Message.Command);
+        }
+
+        [Fact]
+        public async Task ConnectGivesUpAfterTheTimeoutWhenNoAttemptIsAnswered()
+        {
+            using var gateway = new FakeGateway();
+            using var connection = GatewayTestSession.CreateConnection(gateway);
+            connection.ConnectTimeout = TimeSpan.FromMilliseconds(500);
+            connection.ConnectAttemptTimeout = TimeSpan.FromMilliseconds(150);
+
+            int attempts = 0;
+            connection.ConnectSocketAsync = (client, address, port, cancellationToken) =>
+            {
+                attempts++;
+                return Task.Delay(Timeout.Infinite, cancellationToken);
+            };
+
+            TimeoutException failure = await Assert.ThrowsAsync<TimeoutException>(() => connection.ConnectAsync().WaitAsync(Guard));
+
+            Assert.Contains("500 ms", failure.Message);
+            Assert.True(attempts > 1);
+            Assert.False(connection.Connected);
+        }
+
+        [Fact]
         public async Task ConnectIsNotRepeatedWhenTheGatewayRefuses()
         {
             using var gateway = new FakeGateway();
@@ -569,6 +616,27 @@ namespace tests
 
             Assert.Equal(gateway.SessionToken, response.Message.Token);
             Assert.Same(response, (await NextAsync(events)).Package);
+        }
+
+        // A handler attached right after an awaited request must not see that request's package
+        // any more, so the event has to be over before the request completes.
+        [Fact]
+        public async Task PackageReceivedIsRaisedBeforeTheRequestCompletes()
+        {
+            using var gateway = new FakeGateway();
+            using var connection = await ConnectAsync(gateway);
+
+            using var handlerMayReturn = new ManualResetEventSlim();
+            connection.PackageReceived += (sender, e) => handlerMayReturn.Wait(Guard);
+
+            Task<Package> request = connection.SendAsync(Ping());
+            await gateway.WaitForRequestAsync(Command.Ping);
+            await Task.Delay(200);
+            Assert.False(request.IsCompleted);
+
+            handlerMayReturn.Set();
+
+            Assert.Equal(Command.Ping, (await request.WaitAsync(Guard)).Message.Command);
         }
 
         [Fact]

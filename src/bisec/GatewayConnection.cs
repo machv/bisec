@@ -70,12 +70,19 @@ namespace BiSec.Library
         public RequestTimeouts Timeouts { get; } = new RequestTimeouts();
 
         /// <summary>
-        /// The total time allowed for connecting. A real gateway was seen to be unreachable for
-        /// about three seconds now and then, so within this time a connect that fails because the
-        /// host is unreachable is repeated. (The legacy app allows 1.5 s, but it always runs
-        /// discovery first.)
+        /// The total time allowed for connecting. A real gateway was at times slow to accept a
+        /// connection: several seconds, once more than ten, with no pattern found. Within this time
+        /// connecting is attempted repeatedly: an attempt that fails because the host is unreachable,
+        /// or that gets no answer within <see cref="ConnectAttemptTimeout"/>, is replaced by a new one.
         /// </summary>
-        public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(5);
+        public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(20);
+
+        /// <summary>
+        /// How long a single connect attempt may stay unanswered; the legacy app's TCP connect timeout.
+        /// A new attempt reaches a gateway that has just become reachable sooner than the operating
+        /// system's own, ever slower, retransmissions would.
+        /// </summary>
+        public TimeSpan ConnectAttemptTimeout { get; set; } = TimeSpan.FromMilliseconds(1500);
 
         // Replaced in tests to stand in for a gateway that is unreachable at first.
         internal Func<TcpClient, IPAddress, int, CancellationToken, Task> ConnectSocketAsync { get; set; }
@@ -130,7 +137,7 @@ namespace BiSec.Library
                 return;
 
             TcpClient client = null;
-            SocketException unreachable = null;
+            string lastFailure = null;
 
             using (CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
@@ -140,24 +147,34 @@ namespace BiSec.Library
                     while (true)
                     {
                         client = new TcpClient();
-                        try
+                        using (CancellationTokenSource attempt = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token))
                         {
-                            await ConnectSocketAsync(client, _address, _port, timeout.Token).ConfigureAwait(false);
-                            break;
-                        }
-                        catch (SocketException e) when (e.SocketErrorCode == SocketError.HostUnreachable || e.SocketErrorCode == SocketError.NetworkUnreachable)
-                        {
-                            unreachable = e;
-                            client.Dispose();
-                            _logger?.LogDebug($"Gateway {_address} is not reachable yet ({e.Message}); trying again.");
-                            await Task.Delay(ConnectRetryDelay, timeout.Token).ConfigureAwait(false);
+                            attempt.CancelAfter(ConnectAttemptTimeout);
+                            try
+                            {
+                                await ConnectSocketAsync(client, _address, _port, attempt.Token).ConfigureAwait(false);
+                                break;
+                            }
+                            catch (SocketException e) when (e.SocketErrorCode == SocketError.HostUnreachable || e.SocketErrorCode == SocketError.NetworkUnreachable)
+                            {
+                                lastFailure = e.Message;
+                                client.Dispose();
+                                _logger?.LogDebug($"Gateway {_address} is not reachable yet ({e.Message}); trying again.");
+                                await Task.Delay(ConnectRetryDelay, timeout.Token).ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException) when (!timeout.IsCancellationRequested)
+                            {
+                                lastFailure = $"no answer within {ConnectAttemptTimeout.TotalMilliseconds:0} ms";
+                                client.Dispose();
+                                _logger?.LogDebug($"Gateway {_address} did not answer the connect attempt; trying again.");
+                            }
                         }
                     }
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
                     client?.Dispose();
-                    string detail = unreachable == null ? "" : $" Last error: {unreachable.Message}.";
+                    string detail = lastFailure == null ? "" : $" Last error: {lastFailure}.";
                     throw new TimeoutException($"Connecting to gateway {_address}:{_port} timed out after {ConnectTimeout.TotalMilliseconds:0} ms.{detail}");
                 }
                 catch
@@ -433,7 +450,6 @@ namespace BiSec.Library
             {
                 // The gateway addresses responses to the client id it assigned to this connection.
                 _senderId = package.Receiver;
-                pending.Completion.TrySetResult(package);
             }
 
             EventHandler<PackageReceivedEventArgs> handler = PackageReceived;
@@ -448,6 +464,10 @@ namespace BiSec.Library
                     _logger?.LogError($"A PackageReceived handler failed: {e.Message}");
                 }
             }
+
+            // Completed after the event, so whoever awaits the response knows its event has been delivered.
+            if (!unsolicited)
+                pending.Completion.TrySetResult(package);
         }
 
         private void Close(Session session, Exception reason)

@@ -279,9 +279,13 @@ Observed with `bisec-harness` on firmware EE001425-14:
   The gateway accepted it, as well as `GET_USERS` and `GET_USER_RIGHTS`, from a user that is
   not the administrator; the app only offers these to user 0. It also accepted a 9-character
   password, which the app would flag as too short.
-- Now and then the gateway was unreachable for about three seconds at first contact: one TCP
-  connect took 3 s from Windows and one failed with "no route to host" from Linux, while the
-  attempts right after took 3 ms. It happened three times early in a session and not in eight
-  later attempts; the cause is not known.
+- The gateway is at times slow to accept a TCP connection. Seen in about two hours of
+  occasional use: connects that took 1.8 s, 3 s and 4.5 s, one that failed with "no route to
+  host" (from behind a NAT), and two that got no answer for more than 5 s and more than 10 s;
+  all others took milliseconds. No pattern was found: measured after 60 to 260 seconds without
+  traffic, the one slow connect came after 180 s while 200 s and 260 s were immediate.
+- `HM_GET_TRANSITION` for the one port of a demo gateway was answered with `PORT_ERROR`, five
+  times in a row and about one second after each request. Whether a drive was in reach of
+  that gateway is not known, so reading a state from a real gateway is still unconfirmed.
 - A unicast discovery request sent from inside WSL (behind a NAT) got no answer. Broadcast
   discovery on the gateway's own network was not tried.

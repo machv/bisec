@@ -80,8 +80,8 @@ namespace BiSec.Library
 
             return new GatewayWifiSettings
             {
-                Ssid = ssid.Success ? ssid.Value : null,
-                Passphrase = passphrase.Success ? passphrase.Value : null,
+                Ssid = ssid.Success ? WebUtility.HtmlDecode(ssid.Value) : null,
+                Passphrase = passphrase.Success ? WebUtility.HtmlDecode(passphrase.Value) : null,
             };
         }
     }

@@ -106,15 +106,43 @@ namespace tests
         }
 
         [Fact]
-        public async Task GroupStateRequestGivesUpAfterTheThirdAttempt()
+        public async Task GroupStateRequestGivesUpAfterTheFifthErrorAnswer()
         {
             using var session = await GatewayTestSession.AsAdminAsync();
-            session.Gateway.FailNext(Command.GetTransition, Error.PortError, times: 5);
+            session.Gateway.FailNext(Command.GetTransition, Error.PortError, times: 8);
 
             GatewayException e = await Assert.ThrowsAsync<GatewayException>(() => session.Client.GetTransitionAsync(GateGroup(requestablePortId: 2)));
 
             Assert.Equal(Error.PortError, e.Error);
-            Assert.Equal(new[] { "HM_GET_TRANSITION", "HM_GET_TRANSITION", "HM_GET_TRANSITION" }, session.Gateway.RequestNames);
+            Assert.Equal(5, session.Gateway.Requests.Count);
+        }
+
+        // The apps ask by port. Before the rework this overload repeated a request the gateway
+        // answered with an error; four errors in a row still ended in a state.
+        [Fact]
+        public async Task FailedPortStateRequestIsRepeated()
+        {
+            using var session = await GatewayTestSession.AsAdminAsync();
+            session.Gateway.SetTransitions(2, FakeGateway.TransitionPayload(200, 200, 0));
+            session.Gateway.FailNext(Command.GetTransition, Error.GatewayBusy, times: 4);
+
+            Transition transition = await session.Client.GetTransitionAsync(new Port { Id = 2, Type = PortType.Up });
+
+            Assert.Equal(200, transition.ActualState);
+            Assert.Equal(5, session.Gateway.Requests.Count);
+            Assert.All(session.Gateway.Requests, request => Assert.Equal(new byte[] { 2 }, request.Payload));
+        }
+
+        [Fact]
+        public async Task UnansweredStateRequestGivesUpAfterTheThirdAttempt()
+        {
+            using var session = await GatewayTestSession.AsAdminAsync();
+            session.Connection.Timeouts.Set(Command.GetTransition, 150);
+            session.Gateway.IgnoreNext(Command.GetTransition, times: 5);
+
+            await Assert.ThrowsAsync<TimeoutException>(() => session.Client.GetTransitionAsync(2));
+
+            Assert.Equal(3, session.Gateway.Requests.Count);
         }
 
         [Fact]
@@ -148,9 +176,13 @@ namespace tests
         public async Task TruncatedTransitionIsAProtocolError()
         {
             using var session = await GatewayTestSession.AsAdminAsync();
-            session.Gateway.ReplyNext(Command.GetTransition, Command.GetTransition, FakeGateway.TransitionPayload(0, 0, 0).Take(13).ToArray());
+            byte[] truncated = FakeGateway.TransitionPayload(0, 0, 0).Take(13).ToArray();
+            for (int i = 0; i < 3; i++)
+                session.Gateway.ReplyNext(Command.GetTransition, Command.GetTransition, truncated);
 
             await Assert.ThrowsAsync<GatewayProtocolException>(() => session.Client.GetTransitionAsync(1));
+
+            Assert.Equal(3, session.Gateway.Requests.Count);
         }
     }
 }

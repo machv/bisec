@@ -9,18 +9,35 @@ namespace BiSec.Library
 {
     public partial class GatewayClient
     {
-        // The app's transition collector gives up after its third failed request (StateContext.MAX_REQUEST_RETRYS = 2).
+        // An ERROR answer to a state request is often transient, so it is repeated up to this many
+        // attempts in total, as this library always did (the app's StateContext.MAX_ERROR_RETRYS is 5 too).
+        private const int TransitionErrorAttempts = 5;
+
+        // A request that got no usable answer is repeated less often, because each attempt waits for
+        // the full request timeout. The app gives up after its third request (StateContext.MAX_REQUEST_RETRYS = 2).
         private const int TransitionAttempts = 3;
         private const int TransitionRetryDelay = 100;
 
         /// <summary>
-        /// Requests the state reported through one port.
+        /// Requests the state reported through one port, repeating a failed request.
         /// </summary>
         public async Task<Transition> GetTransitionAsync(int portId, CancellationToken cancellationToken = default(CancellationToken))
         {
-            Message response = await RequestAsync(Command.GetTransition, PayloadFactory.GetTransition(portId), cancellationToken).ConfigureAwait(false);
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    Message response = await RequestAsync(Command.GetTransition, PayloadFactory.GetTransition(portId), cancellationToken).ConfigureAwait(false);
 
-            return ParseTransition(response);
+                    return ParseTransition(response);
+                }
+                catch (Exception e) when (IsWorthRepeating(e, attempt))
+                {
+                    _logger?.LogWarning($"Requesting the state of port {portId} failed (attempt {attempt}): {e.Message}");
+                }
+
+                await Task.Delay(TransitionRetryDelay, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         public Task<Transition> GetTransitionAsync(Port port, CancellationToken cancellationToken = default(CancellationToken))
@@ -32,10 +49,10 @@ namespace BiSec.Library
         }
 
         /// <summary>
-        /// Requests a group's state through its requestable port, repeating a failed request like the app does.
+        /// Requests a group's state through its requestable port.
         /// Throws <see cref="InvalidOperationException"/> when the group cannot report its state.
         /// </summary>
-        public async Task<Transition> GetTransitionAsync(Group group, CancellationToken cancellationToken = default(CancellationToken))
+        public Task<Transition> GetTransitionAsync(Group group, CancellationToken cancellationToken = default(CancellationToken))
         {
             if (group == null)
                 throw new ArgumentNullException(nameof(group));
@@ -43,19 +60,7 @@ namespace BiSec.Library
             if (group.RequestablePortId == null)
                 throw new InvalidOperationException($"Group {group.Id} has no requestable port, so the gateway cannot report its state.");
 
-            for (int attempt = 1; ; attempt++)
-            {
-                try
-                {
-                    return await GetTransitionAsync(group.RequestablePortId.Value, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception e) when (attempt < TransitionAttempts && IsWorthRepeating(e))
-                {
-                    _logger?.LogWarning($"Requesting the state of group {group.Id} failed (attempt {attempt}): {e.Message}");
-                }
-
-                await Task.Delay(TransitionRetryDelay, cancellationToken).ConfigureAwait(false);
-            }
+            return GetTransitionAsync(group.RequestablePortId.Value, cancellationToken);
         }
 
         /// <summary>
@@ -81,13 +86,13 @@ namespace BiSec.Library
             return SetStateAsync(port.Id, 0xff, cancellationToken);
         }
 
-        // A denied request has already been repeated once after logging in again.
-        private static bool IsWorthRepeating(Exception e)
+        private static bool IsWorthRepeating(Exception e, int attempt)
         {
+            // A denied request has already been repeated once after logging in again.
             if (e is GatewayException gatewayException)
-                return gatewayException.Error != Error.PermissionDenied;
+                return gatewayException.Error != Error.PermissionDenied && attempt < TransitionErrorAttempts;
 
-            return e is GatewayProtocolException || e is TimeoutException;
+            return (e is GatewayProtocolException || e is TimeoutException) && attempt < TransitionAttempts;
         }
 
         private static Transition ParseTransition(Message response)

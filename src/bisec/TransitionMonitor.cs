@@ -68,6 +68,9 @@ namespace BiSec.Library
             if (group.RequestablePortId == null)
                 throw new InvalidOperationException($"Group {group.Id} has no requestable port, so its drive cannot be followed. Use GatewayClient.SetStateAsync to trigger the port without following.");
 
+            if (group.RequestablePortId.Value < byte.MinValue || group.RequestablePortId.Value > byte.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(group), group.RequestablePortId, "The requestable port id must fit into one byte (0..255).");
+
             Transition transition = await _client.SetStateAsync(port, cancellationToken).ConfigureAwait(false);
             if (transition != null)
                 onTransition?.Invoke(transition);
